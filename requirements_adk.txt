@@ -1,0 +1,48 @@
+# Updated requirements with Google ADK
+# Core FastAPI and web framework
+fastapi==0.104.1
+uvicorn==0.24.0
+pydantic==2.5.0
+python-multipart==0.0.6
+
+# Firebase Admin SDK (Latest as of July 2025)
+firebase-admin==7.0.0
+google-cloud-firestore>=2.21.0
+google-cloud-storage>=3.1.1
+google-api-core>=2.25.1
+cachecontrol>=0.12.14
+pyjwt[crypto]>=2.5.0
+httpx>=0.28.1
+
+# Google APIs for additional services
+google-api-python-client==2.108.0
+googlemaps==4.10.0
+google-auth==2.23.4
+google-auth-oauthlib==1.1.0
+google-auth-httplib2==0.1.1
+
+# Google AI and ADK
+google-generativeai==0.3.2
+google-adk>=1.7.0
+litellm>=1.44.0
+
+# Vector Database
+chromadb==0.4.18
+
+# Redis for caching (optional)
+redis==5.0.1
+
+# Image and media processing
+pillow>=10.1.0
+python-multipart>=0.0.6
+
+# Additional utilities
+python-dotenv==1.0.0
+requests==2.31.0
+numpy==1.25.2
+python-dateutil==2.8.2
+pytz==2023.3
+
+# Development and testing
+pytest>=6.2.0
+pytest-asyncio>=0.16.0

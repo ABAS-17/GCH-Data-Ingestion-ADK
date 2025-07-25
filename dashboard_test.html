@@ -1,0 +1,367 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>City Pulse - Real-Time Dashboard Test</title>
+    <style>
+        body {
+            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+            margin: 0;
+            padding: 20px;
+            background: #f5f7fa;
+        }
+        .dashboard {
+            max-width: 1200px;
+            margin: 0 auto;
+        }
+        .header {
+            background: white;
+            padding: 20px;
+            border-radius: 12px;
+            margin-bottom: 20px;
+            box-shadow: 0 2px 8px rgba(0,0,0,0.1);
+        }
+        .cards-grid {
+            display: grid;
+            grid-template-columns: repeat(auto-fit, minmax(350px, 1fr));
+            gap: 20px;
+        }
+        .card {
+            background: white;
+            border-radius: 12px;
+            padding: 20px;
+            box-shadow: 0 2px 8px rgba(0,0,0,0.1);
+            border-left: 4px solid #e2e8f0;
+            transition: transform 0.2s;
+        }
+        .card:hover {
+            transform: translateY(-2px);
+        }
+        .card.high { border-left-color: #f56565; }
+        .card.critical { border-left-color: #e53e3e; background: #fed7d7; }
+        .card.medium { border-left-color: #ed8936; }
+        .card.low { border-left-color: #48bb78; }
+        
+        .card-type {
+            font-size: 12px;
+            text-transform: uppercase;
+            color: #718096;
+            margin-bottom: 5px;
+        }
+        .card-title {
+            font-size: 16px;
+            font-weight: 600;
+            margin-bottom: 10px;
+            color: #2d3748;
+        }
+        .card-summary {
+            color: #4a5568;
+            margin-bottom: 12px;
+            line-height: 1.5;
+        }
+        .card-action {
+            color: #3182ce;
+            font-size: 14px;
+            font-weight: 500;
+        }
+        .card-meta {
+            font-size: 12px;
+            color: #a0aec0;
+            margin-top: 10px;
+            display: flex;
+            justify-content: space-between;
+        }
+        .status {
+            padding: 8px 16px;
+            border-radius: 6px;
+            font-size: 14px;
+            margin: 10px 0;
+        }
+        .status.connected { background: #c6f6d5; color: #22543d; }
+        .status.disconnected { background: #fed7d7; color: #742a2a; }
+        .connection-info {
+            font-size: 12px;
+            color: #718096;
+        }
+        
+        .synthesis-badge {
+            background: #e6fffa;
+            color: #234e52;
+            padding: 2px 6px;
+            border-radius: 4px;
+            font-size: 10px;
+            margin-left: 10px;
+        }
+        
+        .expand-btn {
+            background: #3182ce;
+            color: white;
+            border: none;
+            padding: 8px 12px;
+            border-radius: 6px;
+            font-size: 12px;
+            cursor: pointer;
+            margin-top: 10px;
+            transition: background 0.2s;
+        }
+        
+        .expand-btn:hover {
+            background: #2c5aa0;
+        }
+        
+        .expanded-details {
+            margin-top: 15px;
+            padding: 15px;
+            background: #f7fafc;
+            border-radius: 8px;
+            border-left: 3px solid #3182ce;
+        }
+        
+        .detail-event {
+            background: white;
+            padding: 12px;
+            margin: 8px 0;
+            border-radius: 6px;
+            border-left: 2px solid #e2e8f0;
+        }
+        
+        .detail-title {
+            font-weight: 600;
+            color: #2d3748;
+            margin-bottom: 5px;
+        }
+        
+        .detail-meta {
+            font-size: 11px;
+            color: #718096;
+            margin-top: 5px;
+        }
+    </style>
+</head>
+<body>
+    <div class="dashboard">
+        <div class="header">
+            <h1>🏙️ City Pulse - Real-Time Dashboard</h1>
+            <p>User: <strong id="userId">arjun_user_id</strong> | Location: <strong>HSR Layout, Bengaluru</strong></p>
+            <div id="connectionStatus" class="status disconnected">Connecting to real-time updates...</div>
+            <div class="connection-info">
+                Last Update: <span id="lastUpdate">Never</span> | 
+                Total Updates: <span id="updateCount">0</span> |
+                High Priority Alerts: <span id="highPriorityCount">0</span>
+            </div>
+        </div>
+        
+        <div id="cardsContainer" class="cards-grid">
+            <div class="card">
+                <div class="card-type">System</div>
+                <div class="card-title">Loading Dashboard...</div>
+                <div class="card-summary">Connecting to real-time data stream...</div>
+                <div class="card-action">Please wait</div>
+            </div>
+        </div>
+    </div>
+
+    <script>
+        const userId = 'arjun_user_id';
+        const userLat = 12.9120;
+        const userLng = 77.6365;
+        let updateCount = 0;
+        let eventSource = null;
+
+        function updateConnectionStatus(connected, message = '') {
+            const statusEl = document.getElementById('connectionStatus');
+            if (connected) {
+                statusEl.className = 'status connected';
+                statusEl.textContent = '🟢 Connected - Real-time updates active';
+            } else {
+                statusEl.className = 'status disconnected';
+                statusEl.textContent = `🔴 Disconnected ${message}`;
+            }
+        }
+
+        function updateLastUpdate() {
+            document.getElementById('lastUpdate').textContent = new Date().toLocaleTimeString();
+            document.getElementById('updateCount').textContent = ++updateCount;
+        }
+
+        function renderCard(card) {
+            const distance = card.distance_km ? 
+                (card.distance_km < 1 ? `${Math.round(card.distance_km * 1000)}m away` : `${card.distance_km.toFixed(1)}km away`) 
+                : '';
+
+            const isSynthesis = card.type.includes('synthesis');
+            const expandButton = isSynthesis ? 
+                `<button onclick="expandCard('${card.id}')" class="expand-btn">📋 View ${card.synthesis_meta?.event_count || 'All'} Details</button>` : '';
+
+            const synthesisBadge = isSynthesis ? 
+                `<span class="synthesis-badge">🤖 AI Summary of ${card.synthesis_meta?.event_count || 2} incidents</span>` : '';
+
+            return `
+                <div class="card ${card.priority}" data-card-id="${card.id}">
+                    <div class="card-type">${card.type.replace('_', ' ')} ${synthesisBadge}</div>
+                    <div class="card-title">${card.title}</div>
+                    <div class="card-summary">${card.summary}</div>
+                    <div class="card-action">💡 ${card.action}</div>
+                    ${expandButton}
+                    <div class="card-meta">
+                        <span>Confidence: ${Math.round(card.confidence * 100)}%</span>
+                        <span>${distance}</span>
+                    </div>
+                </div>
+            `;
+        }
+
+        function renderDashboard(cards) {
+            const container = document.getElementById('cardsContainer');
+            if (cards && cards.length > 0) {
+                container.innerHTML = cards.map(renderCard).join('');
+                
+                // Update high priority count
+                const highPriorityCards = cards.filter(c => c.priority === 'high' || c.priority === 'critical');
+                document.getElementById('highPriorityCount').textContent = highPriorityCards.length;
+            } else {
+                container.innerHTML = `
+                    <div class="card">
+                        <div class="card-type">Status</div>
+                        <div class="card-title">No Alerts</div>
+                        <div class="card-summary">All systems normal in your area.</div>
+                        <div class="card-action">Enjoy your day!</div>
+                    </div>
+                `;
+            }
+        }
+
+        function connectToStream() {
+            // Close existing connection
+            if (eventSource) {
+                eventSource.close();
+            }
+
+            const streamUrl = `http://localhost:8000/dashboard/${userId}/stream?lat=${userLat}&lng=${userLng}`;
+            eventSource = new EventSource(streamUrl);
+
+            eventSource.onopen = function(event) {
+                console.log('✅ Dashboard stream connected');
+                updateConnectionStatus(true);
+            };
+
+            eventSource.onmessage = function(event) {
+                try {
+                    const data = JSON.parse(event.data);
+                    console.log('📊 Dashboard update received:', data.type);
+
+                    if (data.type === 'dashboard_update') {
+                        renderDashboard(data.cards);
+                        updateLastUpdate();
+                        
+                        // Highlight new high-priority alerts
+                        if (data.high_priority_count > 0) {
+                            console.log(`🚨 ${data.high_priority_count} high-priority alerts`);
+                        }
+                    } else if (data.type === 'heartbeat') {
+                        console.log('💓 Heartbeat received');
+                    }
+                } catch (error) {
+                    console.error('Error parsing dashboard data:', error);
+                }
+            };
+
+            eventSource.onerror = function(event) {
+                console.error('❌ Dashboard stream error:', event);
+                updateConnectionStatus(false, '- Attempting to reconnect...');
+                
+                // Attempt to reconnect after 5 seconds
+                setTimeout(() => {
+                    console.log('🔄 Attempting to reconnect dashboard stream...');
+                    connectToStream();
+                }, 5000);
+            };
+        }
+
+        // Start the real-time connection
+        connectToStream();
+
+        // Add expansion functionality
+        window.expandCard = async function(cardId) {
+            try {
+                console.log(`🔍 Expanding card: ${cardId}`);
+                const response = await fetch(`http://localhost:8000/dashboard/${userId}/expand/${cardId}?lat=${userLat}&lng=${userLng}`);
+                const data = await response.json();
+                
+                if (data.success) {
+                    showExpandedDetails(data);
+                } else {
+                    console.error('Failed to expand card:', data);
+                }
+            } catch (error) {
+                console.error('Error expanding card:', error);
+            }
+        };
+
+        function showExpandedDetails(expansionData) {
+            const modal = document.createElement('div');
+            modal.style.cssText = `
+                position: fixed; top: 0; left: 0; width: 100%; height: 100%;
+                background: rgba(0,0,0,0.5); z-index: 1000; display: flex;
+                align-items: center; justify-content: center; padding: 20px;
+            `;
+            
+            const content = document.createElement('div');
+            content.style.cssText = `
+                background: white; border-radius: 12px; padding: 30px;
+                max-width: 800px; max-height: 80vh; overflow-y: auto;
+                position: relative;
+            `;
+            
+            const closeBtn = document.createElement('button');
+            closeBtn.textContent = '✕';
+            closeBtn.style.cssText = `
+                position: absolute; top: 15px; right: 20px;
+                background: none; border: none; font-size: 20px;
+                cursor: pointer; color: #718096;
+            `;
+            closeBtn.onclick = () => modal.remove();
+            
+            const detailsHTML = `
+                <h2>📊 ${expansionData.expanded_topic.toUpperCase()} Details</h2>
+                <p><strong>${expansionData.total_events}</strong> individual incidents in your area:</p>
+                <div class="expanded-details">
+                    ${expansionData.individual_events.map(event => `
+                        <div class="detail-event">
+                            <div class="detail-title">${event.title}</div>
+                            <div>${event.summary}</div>
+                            <div class="detail-meta">
+                                Distance: ${event.distance_km?.toFixed(2)}km | 
+                                Confidence: ${Math.round(event.confidence * 100)}% |
+                                Severity: ${event.expanded_details?.severity || 'Unknown'}
+                            </div>
+                        </div>
+                    `).join('')}
+                </div>
+            `;
+            
+            content.innerHTML = detailsHTML;
+            content.appendChild(closeBtn);
+            modal.appendChild(content);
+            document.body.appendChild(modal);
+        }
+
+        // Start the real-time connection
+        connectToStream();
+
+        // Also load initial dashboard state
+        fetch(`http://localhost:8000/dashboard/${userId}?lat=${userLat}&lng=${userLng}`)
+            .then(response => response.json())
+            .then(data => {
+                if (data.success) {
+                    renderDashboard(data.cards);
+                    console.log('📋 Initial dashboard loaded');
+                }
+            })
+            .catch(error => {
+                console.error('Error loading initial dashboard:', error);
+            });
+    </script>
+</body>
+</html>
