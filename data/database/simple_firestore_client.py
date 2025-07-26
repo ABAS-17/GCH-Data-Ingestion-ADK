@@ -9,11 +9,13 @@ import logging
 from typing import List, Dict, Any, Optional, Tuple
 from datetime import datetime, timedelta
 import json
+import os
 
 try:
     from google.cloud import firestore
     from google.cloud.firestore import AsyncClient
     from google.api_core import exceptions as gcp_exceptions
+    from google.oauth2 import service_account
     FIRESTORE_AVAILABLE = True
 except ImportError:
     FIRESTORE_AVAILABLE = False
@@ -55,11 +57,48 @@ class SimpleFirestoreSubcategoryClient:
                 self._mock_data = {}
                 self._initialized = True
                 return True
+            
+            # Try file-based credentials first
+            creds_path = os.getenv("GOOGLE_APPLICATION_CREDENTIALS")
+            if creds_path and os.path.exists(creds_path):
+                logger.info("Initializing Firestore with credentials file")
+                if not config.FIREBASE_PROJECT_ID:
+                    raise ValueError("FIREBASE_PROJECT_ID not configured")
+                self.db = firestore.AsyncClient(project=config.FIREBASE_PROJECT_ID)
+            else:
+                # Fall back to environment variables
+                firebase_project_id = os.getenv('FIREBASE_PROJECT_ID')
+                firebase_private_key = os.getenv('FIREBASE_PRIVATE_KEY')
+                firebase_client_email = os.getenv('FIREBASE_CLIENT_EMAIL')
                 
-            if not config.FIREBASE_PROJECT_ID:
-                raise ValueError("FIREBASE_PROJECT_ID not configured")
-                
-            self.db = firestore.AsyncClient(project=config.FIREBASE_PROJECT_ID)
+                if firebase_project_id and firebase_private_key and firebase_client_email:
+                    logger.info("Initializing Firestore with environment variables")
+                    
+                    creds_dict = {
+                        "type": os.getenv('FIREBASE_TYPE', 'service_account'),
+                        "project_id": firebase_project_id,
+                        "private_key_id": os.getenv('FIREBASE_PRIVATE_KEY_ID'),
+                        "private_key": firebase_private_key,
+                        "client_email": firebase_client_email,
+                        "client_id": os.getenv('FIREBASE_CLIENT_ID'),
+                        "auth_uri": os.getenv('FIREBASE_AUTH_URI', 'https://accounts.google.com/o/oauth2/auth'),
+                        "token_uri": os.getenv('FIREBASE_TOKEN_URI', 'https://oauth2.googleapis.com/token'),
+                        "auth_provider_x509_cert_url": os.getenv('FIREBASE_AUTH_PROVIDER_X509_CERT_URL', 'https://www.googleapis.com/oauth2/v1/certs'),
+                        "client_x509_cert_url": os.getenv('FIREBASE_CLIENT_X509_CERT_URL'),
+                        "universe_domain": os.getenv('FIREBASE_UNIVERSE_DOMAIN', 'googleapis.com')
+                    }
+                    
+                    # Remove None values
+                    creds_dict = {k: v for k, v in creds_dict.items() if v is not None}
+                    
+                    credentials = service_account.Credentials.from_service_account_info(creds_dict)
+                    self.db = firestore.AsyncClient(project=firebase_project_id, credentials=credentials)
+                else:
+                    logger.warning("Firestore credentials not found in file or environment variables")
+                    logger.warning("Using mock Firestore implementation")
+                    self._mock_data = {}
+                    self._initialized = True
+                    return True
             
             # Test connection
             await self._test_connection()
@@ -70,11 +109,15 @@ class SimpleFirestoreSubcategoryClient:
             
         except Exception as e:
             logger.error(f"❌ Failed to initialize Firestore client: {e}")
-            return False
+            # Fall back to mock implementation
+            logger.warning("Falling back to mock Firestore implementation")
+            self._mock_data = {}
+            self._initialized = True
+            return True
     
     async def _test_connection(self):
         """Test Firestore connection"""
-        if not FIRESTORE_AVAILABLE:
+        if not FIRESTORE_AVAILABLE or not self.db:
             return True
             
         try:
@@ -97,7 +140,7 @@ class SimpleFirestoreSubcategoryClient:
             await self.initialize()
             
         try:
-            if not FIRESTORE_AVAILABLE:
+            if not FIRESTORE_AVAILABLE or not self.db:
                 return await self._mock_create_subcategory(subcategory)
                 
             # Check if subcategory already exists
@@ -126,7 +169,7 @@ class SimpleFirestoreSubcategoryClient:
             await self.initialize()
             
         try:
-            if not FIRESTORE_AVAILABLE:
+            if not FIRESTORE_AVAILABLE or not self.db:
                 return self._mock_data.get(subcategory_id)
                 
             doc_ref = self.db.collection(self.SUBCATEGORIES_COLLECTION).document(subcategory_id)
@@ -149,7 +192,7 @@ class SimpleFirestoreSubcategoryClient:
             await self.initialize()
             
         try:
-            if not FIRESTORE_AVAILABLE:
+            if not FIRESTORE_AVAILABLE or not self.db:
                 return [sc for sc in self._mock_data.values() 
                        if sc.topic == topic and (not status or sc.status == status)]
                 
@@ -180,7 +223,7 @@ class SimpleFirestoreSubcategoryClient:
             await self.initialize()
             
         try:
-            if not FIRESTORE_AVAILABLE:
+            if not FIRESTORE_AVAILABLE or not self.db:
                 subcategory = self._mock_data.get(subcategory_id)
                 if subcategory:
                     subcategory.update_metadata(confidence_score, user_confirmed, user_rejected)
@@ -260,7 +303,7 @@ class SimpleFirestoreSubcategoryClient:
     
     async def _get_subcategory_by_name(self, topic: EventTopic, name: str) -> Optional[Subcategory]:
         """Get subcategory by name"""
-        if not FIRESTORE_AVAILABLE:
+        if not FIRESTORE_AVAILABLE or not self.db:
             return await self._find_subcategory_by_name_or_alias(topic, name)
             
         try:
@@ -329,7 +372,7 @@ class SimpleFirestoreSubcategoryClient:
             return False
             
         try:
-            if not FIRESTORE_AVAILABLE:
+            if not FIRESTORE_AVAILABLE or not self.db:
                 return True
             
             await self._test_connection()
@@ -343,6 +386,9 @@ class SimpleFirestoreSubcategoryClient:
     
     async def _mock_create_subcategory(self, subcategory: Subcategory) -> bool:
         """Mock implementation for development"""
+        if not hasattr(self, '_mock_data'):
+            self._mock_data = {}
+            
         if subcategory.id in self._mock_data:
             return True  # Already exists, consider success
         self._mock_data[subcategory.id] = subcategory
