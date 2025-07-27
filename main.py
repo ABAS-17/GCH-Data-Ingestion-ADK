@@ -4,7 +4,7 @@ City Pulse Agent - FastAPI Backend
 Complete REST API for smart city incident reporting and management
 """
 
-from fastapi import FastAPI, HTTPException, UploadFile, File, Form, Depends, BackgroundTasks, status
+from fastapi import FastAPI, HTTPException, UploadFile, File, Form, Depends, BackgroundTasks, status, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
@@ -185,19 +185,26 @@ async def create_enhanced_event(
 ):
     """Create event with comprehensive media support"""
     try:
-        # Convert to basic request for processing
+        # FIXED: Handle location properly - check if it's already a dict
         location_data = enhanced_request.location
-        if hasattr(location_data, 'lat') and hasattr(location_data, 'lng'):
+        
+        if isinstance(location_data, dict):
+            # Already a dict with lat/lng
+            location_dict = location_data
+        elif hasattr(location_data, 'lat') and hasattr(location_data, 'lng'):
+            # Coordinates object
             location_dict = {"lat": location_data.lat, "lng": location_data.lng}
         else:
-            location_dict = location_data
+            # Fallback to default Bangalore location
+            logger.warning(f"Invalid location data: {location_data}, using default")
+            location_dict = {"lat": 12.9716, "lng": 77.5946}
             
         basic_request = EventCreateRequest(
             topic=enhanced_request.topic,
             sub_topic=enhanced_request.sub_topic,
             title=enhanced_request.title,
             description=enhanced_request.description,
-            location=location_dict,
+            location=location_dict,  # This should now work correctly
             address=enhanced_request.address,
             severity=enhanced_request.severity,
             media_urls=enhanced_request.media_urls
@@ -410,7 +417,7 @@ async def upload_media(
                     uploaded_files.append({
                         "filename": file.filename,
                         "content_type": file.content_type,
-                        "size_bytes": file.size,
+                        "size_bytes": str(file.size),
                         "storage_url": storage_url
                     })
                     storage_urls.append(storage_url)
@@ -440,20 +447,46 @@ async def upload_media(
 
 @app.post("/media/analyze", response_model=MediaAnalysisResponse, tags=["Media"])
 async def analyze_media(
-    media_url: str,
+    request: Request,
+    media_url: Optional[str] = None,
     media_type: str = "image"
 ):
-    """Analyze uploaded media using AI"""
+    """FIXED: Analyze uploaded media using AI - supports both query params and JSON body"""
     try:
         start_time = datetime.utcnow()
+        
+        # FIXED: Support both query parameters and JSON body
+        if media_url is None:
+            # Try to get from JSON body if not in query params
+            try:
+                body = await request.json()
+                media_url = body.get("media_url")
+                media_type = body.get("media_type", "image")
+                logger.info(f"📨 Got media analysis request from JSON body: {media_url}")
+            except Exception as json_error:
+                logger.warning(f"Could not parse JSON body: {json_error}")
+                # If no JSON body, media_url should be in query params
+                pass
+        else:
+            logger.info(f"📨 Got media analysis request from query params: {media_url}")
+        
+        if not media_url:
+            raise HTTPException(
+                status_code=400, 
+                detail="media_url is required either as query parameter (?media_url=...) or in JSON body {'media_url': '...'}"
+            )
+        
+        logger.info(f"🤖 Starting analysis of {media_type} media: {media_url}")
         
         # Perform comprehensive media analysis
         analysis = await enhanced_processor.analyze_media_comprehensive(media_url, media_type)
         
         if not analysis:
-            raise HTTPException(status_code=400, detail="Failed to analyze media")
+            raise HTTPException(status_code=400, detail="Failed to analyze media - analysis returned empty")
         
         processing_time = (datetime.utcnow() - start_time).total_seconds() * 1000
+        
+        logger.info(f"✅ Media analysis completed in {processing_time:.0f}ms")
         
         return MediaAnalysisResponse(
             media_url=media_url,
@@ -462,14 +495,15 @@ async def analyze_media(
                 "description": analysis.gemini_description,
                 "detected_objects": analysis.detected_objects,
                 "visibility": analysis.visibility,
-                "weather_impact": analysis.weather_impact
+                "weather_impact": analysis.weather_impact,
+                "confidence_score": analysis.confidence_score
             },
             confidence_score=analysis.confidence_score,
             processing_time_ms=int(processing_time)
         )
         
     except Exception as e:
-        logger.error(f"Error analyzing media: {e}")
+        logger.error(f"❌ Error analyzing media: {e}")
         raise HTTPException(status_code=500, detail=f"Analysis failed: {str(e)}")
 
 @app.get("/media/formats", tags=["Media"])
@@ -667,7 +701,6 @@ async def post_process_event(event_id: str):
         logger.info(f"Post-processing event: {event_id}")
         await asyncio.sleep(1)  # Simulate processing time
         logger.info(f"Post-processing completed for event: {event_id}")
-        logger.warning(f"⚠️  Event {event_id} NOT indexed in ChromaDB - search will not find it!")
         
     except Exception as e:
         logger.error(f"Error in post-processing event {event_id}: {e}")

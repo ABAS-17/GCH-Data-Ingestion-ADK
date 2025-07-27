@@ -98,11 +98,25 @@ class DatabaseManager:
     async def process_user_report(self, report: EventCreateRequest, user_id: str) -> Event:
         """Process user-submitted report into a complete event"""
         try:
+            # FIXED: Convert location to Coordinates object if it's a dict
+            location = report.location
+            if isinstance(location, dict):
+                if 'lat' in location and 'lng' in location:
+                    coordinates = Coordinates(lat=location['lat'], lng=location['lng'])
+                    logger.info(f"✅ Converted location dict to Coordinates: {coordinates}")
+                else:
+                    raise ValueError(f"Invalid location dict: {location}. Must contain 'lat' and 'lng' keys.")
+            elif isinstance(location, Coordinates):
+                coordinates = location
+                logger.info(f"✅ Location already Coordinates object: {coordinates}")
+            else:
+                raise ValueError(f"Invalid location type: {type(location)}. Must be Coordinates object or dict with lat/lng.")
+            
             # Process the report using AI
             event = await self.processor.process_user_report(
                 title=report.title,
                 description=report.description,
-                location=report.location,
+                location=coordinates,  # Now guaranteed to be Coordinates object
                 address=report.address,
                 media_urls=report.media_urls
             )
@@ -114,11 +128,12 @@ class DatabaseManager:
             # Save the event
             event_id = await self.create_event(event)
             
-            logger.info(f"Processed user report from {user_id} into event {event_id}")
+            logger.info(f"✅ Processed user report from {user_id} into event {event_id}")
             return event
             
         except Exception as e:
-            logger.error(f"Error processing user report: {e}")
+            logger.error(f"❌ Error processing user report: {e}")
+            logger.error(f"Location received: {report.location} (type: {type(report.location)})")
             raise
     
     async def search_events_semantically(self, query: str, 
