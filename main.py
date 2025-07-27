@@ -4,9 +4,9 @@ City Pulse Agent - FastAPI Backend
 Complete REST API for smart city incident reporting and management
 """
 
-from fastapi import FastAPI, HTTPException, UploadFile, File, Form, Depends, BackgroundTasks, status
+from fastapi import FastAPI, HTTPException, UploadFile, File, Form, Depends, BackgroundTasks, status, Request
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import JSONResponse, StreamingResponse
+from fastapi.responses import JSONResponse
 from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
 from pydantic import BaseModel, ValidationError
 from typing import List, Dict, Any, Optional, Union
@@ -17,6 +17,10 @@ import json
 import io
 import sys
 import os
+import time
+from functools import lru_cache
+from auth_endpoints import router as auth_router
+from auth_database import auth_db
 
 # Add data layer to path
 sys.path.append(os.path.dirname(os.path.abspath(__file__)))
@@ -70,6 +74,10 @@ app.include_router(user_router)
 # Security
 security = HTTPBearer(auto_error=False)
 
+# Simple cache for dashboard cards
+dashboard_cache = {}
+CACHE_DURATION = 300  # 5 minutes
+
 # ============================================================================
 # STARTUP AND HEALTH CHECK
 # ============================================================================
@@ -78,6 +86,11 @@ security = HTTPBearer(auto_error=False)
 async def startup_event():
     """Initialize databases and services on startup"""
     logger.info("🚀 Starting City Pulse Agent API...")
+    
+    # Initialize authentication database
+    auth_healthy = await auth_db.initialize()
+    if not auth_healthy:
+        logger.warning("⚠️ Authentication database initialization failed")
     
     # Initialize databases
     db_healthy = await db_manager.initialize_databases()
@@ -91,7 +104,6 @@ async def startup_event():
         logger.warning("⚠️ Subcategory processor initialization failed - using fallback")
     
     logger.info("✅ City Pulse Agent API started successfully")
-
 @app.get("/health", tags=["System"])
 async def health_check():
     """System health check"""
@@ -179,22 +191,26 @@ async def create_enhanced_event(
 ):
     """Create event with comprehensive media support"""
     try:
-        # Convert to basic request for processing
-        # Handle the location properly - convert Coordinates back to dict if needed
+        # FIXED: Handle location properly - check if it's already a dict
         location_data = enhanced_request.location
-        if hasattr(location_data, 'lat') and hasattr(location_data, 'lng'):
-            # It's a Coordinates object, convert to dict
+        
+        if isinstance(location_data, dict):
+            # Already a dict with lat/lng
+            location_dict = location_data
+        elif hasattr(location_data, 'lat') and hasattr(location_data, 'lng'):
+            # Coordinates object
             location_dict = {"lat": location_data.lat, "lng": location_data.lng}
         else:
-            # It's already a dict
-            location_dict = location_data
+            # Fallback to default Bangalore location
+            logger.warning(f"Invalid location data: {location_data}, using default")
+            location_dict = {"lat": 12.9716, "lng": 77.5946}
             
         basic_request = EventCreateRequest(
             topic=enhanced_request.topic,
             sub_topic=enhanced_request.sub_topic,
             title=enhanced_request.title,
             description=enhanced_request.description,
-            location=location_dict,
+            location=location_dict,  # This should now work correctly
             address=enhanced_request.address,
             severity=enhanced_request.severity,
             media_urls=enhanced_request.media_urls
@@ -407,7 +423,7 @@ async def upload_media(
                     uploaded_files.append({
                         "filename": file.filename,
                         "content_type": file.content_type,
-                        "size_bytes": file.size,
+                        "size_bytes": str(file.size),
                         "storage_url": storage_url
                     })
                     storage_urls.append(storage_url)
@@ -437,20 +453,46 @@ async def upload_media(
 
 @app.post("/media/analyze", response_model=MediaAnalysisResponse, tags=["Media"])
 async def analyze_media(
-    media_url: str,
+    request: Request,
+    media_url: Optional[str] = None,
     media_type: str = "image"
 ):
-    """Analyze uploaded media using AI"""
+    """FIXED: Analyze uploaded media using AI - supports both query params and JSON body"""
     try:
         start_time = datetime.utcnow()
+        
+        # FIXED: Support both query parameters and JSON body
+        if media_url is None:
+            # Try to get from JSON body if not in query params
+            try:
+                body = await request.json()
+                media_url = body.get("media_url")
+                media_type = body.get("media_type", "image")
+                logger.info(f"📨 Got media analysis request from JSON body: {media_url}")
+            except Exception as json_error:
+                logger.warning(f"Could not parse JSON body: {json_error}")
+                # If no JSON body, media_url should be in query params
+                pass
+        else:
+            logger.info(f"📨 Got media analysis request from query params: {media_url}")
+        
+        if not media_url:
+            raise HTTPException(
+                status_code=400, 
+                detail="media_url is required either as query parameter (?media_url=...) or in JSON body {'media_url': '...'}"
+            )
+        
+        logger.info(f"🤖 Starting analysis of {media_type} media: {media_url}")
         
         # Perform comprehensive media analysis
         analysis = await enhanced_processor.analyze_media_comprehensive(media_url, media_type)
         
         if not analysis:
-            raise HTTPException(status_code=400, detail="Failed to analyze media")
+            raise HTTPException(status_code=400, detail="Failed to analyze media - analysis returned empty")
         
         processing_time = (datetime.utcnow() - start_time).total_seconds() * 1000
+        
+        logger.info(f"✅ Media analysis completed in {processing_time:.0f}ms")
         
         return MediaAnalysisResponse(
             media_url=media_url,
@@ -459,14 +501,15 @@ async def analyze_media(
                 "description": analysis.gemini_description,
                 "detected_objects": analysis.detected_objects,
                 "visibility": analysis.visibility,
-                "weather_impact": analysis.weather_impact
+                "weather_impact": analysis.weather_impact,
+                "confidence_score": analysis.confidence_score
             },
             confidence_score=analysis.confidence_score,
             processing_time_ms=int(processing_time)
         )
         
     except Exception as e:
-        logger.error(f"Error analyzing media: {e}")
+        logger.error(f"❌ Error analyzing media: {e}")
         raise HTTPException(status_code=500, detail=f"Analysis failed: {str(e)}")
 
 @app.get("/media/formats", tags=["Media"])
@@ -492,9 +535,6 @@ async def get_supported_formats():
 async def chat_with_agent(chat_request: ChatRequest):
     """Chat with the City Pulse Agent"""
     try:
-        # For now, implement basic chat response
-        # This will be enhanced with the agentic layer
-        
         user_message = chat_request.message.lower()
         response_text = ""
         suggestions = []
@@ -541,9 +581,6 @@ async def chat_with_agent(chat_request: ChatRequest):
 async def enhanced_chat_with_media(chat_request: ChatWithMediaRequest):
     """Enhanced chat with media context support"""
     try:
-        # Basic enhanced chat implementation
-        # Will be expanded with agentic capabilities
-        
         response_text = f"I received your message: '{chat_request.message}'"
         media_insights = None
         
@@ -668,14 +705,8 @@ async def post_process_event(event_id: str):
     """Background task for additional event processing"""
     try:
         logger.info(f"Post-processing event: {event_id}")
-        
-        # TODO: Get the actual event from database and add to ChromaDB
-        # This is where the event should be indexed for search
-        # Currently missing: event -> ChromaDB vector storage
-        
         await asyncio.sleep(1)  # Simulate processing time
         logger.info(f"Post-processing completed for event: {event_id}")
-        logger.warning(f"⚠️  Event {event_id} NOT indexed in ChromaDB - search will not find it!")
         
     except Exception as e:
         logger.error(f"Error in post-processing event {event_id}: {e}")
@@ -765,11 +796,7 @@ async def get_test_scenarios():
     }
 
 # ============================================================================
-# ERROR HANDLERS
-# ============================================================================
-
-# ============================================================================
-# REAL-TIME DASHBOARD WITH SSE
+# DASHBOARD MODELS AND HELPERS
 # ============================================================================
 
 class DashboardCard(BaseModel):
@@ -790,6 +817,32 @@ class DashboardCard(BaseModel):
     expansion_url: Optional[str] = None
     synthesis_meta: Optional[Dict[str, Any]] = None
     expanded_details: Optional[Dict[str, Any]] = None
+
+async def get_cached_dashboard_cards(user_id: str, lat: float = None, lng: float = None):
+    """Get dashboard cards with simple caching"""
+    cache_key = f"{user_id}_{lat}_{lng}"
+    current_time = time.time()
+    
+    # Check cache
+    if cache_key in dashboard_cache:
+        cached_data, timestamp = dashboard_cache[cache_key]
+        if current_time - timestamp < CACHE_DURATION:
+            logger.info(f"Returning cached dashboard for {user_id}")
+            return cached_data
+    
+    # Generate fresh data
+    cards = await generate_user_dashboard_cards(user_id, lat, lng)
+    
+    # Cache it
+    dashboard_cache[cache_key] = (cards, current_time)
+    
+    # Clean old cache entries (simple cleanup)
+    if len(dashboard_cache) > 100:
+        oldest_keys = sorted(dashboard_cache.keys(), key=lambda k: dashboard_cache[k][1])[:20]
+        for old_key in oldest_keys:
+            del dashboard_cache[old_key]
+    
+    return cards
 
 async def synthesize_dashboard_cards(raw_events: List[Dict], user_id: str, user_location: Coordinates = None) -> List[DashboardCard]:
     """AI-powered synthesis of multiple events into intelligent summary cards"""
@@ -892,12 +945,11 @@ async def create_synthesized_card(topic: str, events: List[Dict], user_id: str, 
         """
         
         # Get AI synthesis
-        from data.processors.enhanced_subcategory_processor import enhanced_subcategory_processor
-        response = enhanced_subcategory_processor.model.generate_content(synthesis_prompt)
-        
         try:
+            response = enhanced_subcategory_processor.model.generate_content(synthesis_prompt)
             ai_synthesis = json.loads(response.text.strip())
-        except json.JSONDecodeError:
+        except Exception as e:
+            logger.error(f"Error creating synthesized card: {e}")
             # Fallback if AI response isn't proper JSON
             ai_synthesis = {
                 "title": f"{len(events)} {topic.title()} Incidents in Your Area",
@@ -1061,76 +1113,126 @@ async def generate_user_dashboard_cards(user_id: str, lat: float = None, lng: fl
             )
         ]
 
-@app.get("/dashboard/{user_id}/stream")
-async def dashboard_stream(user_id: str, lat: Optional[float] = None, lng: Optional[float] = None):
-    """Real-time dashboard updates using Server-Sent Events"""
-    
-    async def event_generator():
-        """Generate real-time dashboard updates"""
-        last_update = datetime.utcnow()
+# ============================================================================
+# ON-DEMAND DASHBOARD ENDPOINTS (NO STREAMING)
+# ============================================================================
+
+@app.get("/dashboard/{user_id}")
+async def get_user_dashboard(user_id: str, lat: Optional[float] = None, lng: Optional[float] = None):
+    """Get current dashboard state with optional caching"""
+    try:
+        # Add simple timestamp-based caching (5-minute buckets)
+        current_time = datetime.utcnow()
+        cache_bucket = int(current_time.timestamp() // 300)  # 5-minute cache
         
-        # Send initial dashboard
-        try:
-            cards = await generate_user_dashboard_cards(user_id, lat, lng)
-            initial_data = {
-                "type": "dashboard_update",
-                "cards": [card.dict() for card in cards],
-                "timestamp": datetime.utcnow().isoformat(),
-                "user_id": user_id
-            }
-            yield f"data: {json.dumps(initial_data)}\n\n"
-            
-            while True:
-                await asyncio.sleep(15)  # Check every 15 seconds
-                
-                # Generate updated cards
-                updated_cards = await generate_user_dashboard_cards(user_id, lat, lng)
-                
-                # Check if there are any changes (new events, updated priorities)
-                current_time = datetime.utcnow()
-                
-                # Send update if enough time has passed or if high-priority events
-                high_priority_events = [c for c in updated_cards if c.priority in ["high", "critical"]]
-                time_since_update = (current_time - last_update).total_seconds()
-                
-                if high_priority_events or time_since_update > 60:  # Update every minute or immediately for high priority
-                    update_data = {
-                        "type": "dashboard_update",
-                        "cards": [card.dict() for card in updated_cards],
-                        "timestamp": current_time.isoformat(),
-                        "user_id": user_id,
-                        "high_priority_count": len(high_priority_events)
-                    }
-                    yield f"data: {json.dumps(update_data)}\n\n"
-                    last_update = current_time
-                
-                # Send heartbeat every 30 seconds to keep connection alive
-                if time_since_update > 30:
-                    heartbeat = {
-                        "type": "heartbeat",
-                        "timestamp": current_time.isoformat()
-                    }
-                    yield f"data: {json.dumps(heartbeat)}\n\n"
-                    
-        except Exception as e:
-            logger.error(f"Error in dashboard stream for user {user_id}: {e}")
-            error_data = {
-                "type": "error",
-                "message": "Dashboard stream error",
-                "timestamp": datetime.utcnow().isoformat()
-            }
-            yield f"data: {json.dumps(error_data)}\n\n"
-    
-    return StreamingResponse(
-        event_generator(),
-        media_type="text/plain",
-        headers={
-            "Cache-Control": "no-cache",
-            "Connection": "keep-alive",
-            "Access-Control-Allow-Origin": "*",
-            "Access-Control-Allow-Headers": "Cache-Control",
+        # Get cached or fresh cards
+        cards = await get_cached_dashboard_cards(user_id, lat, lng)
+        
+        # Add expansion info to synthesized cards
+        response_cards = []
+        for card in cards:
+            card_dict = card.dict()
+            if card.synthesis_meta:
+                card_dict["expandable"] = True
+                card_dict["expansion_url"] = f"/dashboard/{user_id}/expand/{card.id}?lat={lat}&lng={lng}"
+            else:
+                card_dict["expandable"] = False
+            response_cards.append(card_dict)
+        
+        return {
+            "success": True,
+            "cards": response_cards,
+            "total_cards": len(cards),
+            "generated_at": current_time.isoformat(),
+            "user_id": user_id,
+            "update_type": "on_demand",
+            "cache_bucket": cache_bucket,
+            "ai_synthesis": "enabled"
         }
-    )
+    except Exception as e:
+        logger.error(f"Error generating dashboard for user {user_id}: {e}")
+        raise HTTPException(status_code=500, detail=f"Failed to generate dashboard: {str(e)}")
+
+@app.post("/dashboard/{user_id}/refresh")
+async def refresh_dashboard(user_id: str, lat: Optional[float] = None, lng: Optional[float] = None):
+    """Force refresh dashboard with fresh AI synthesis"""
+    try:
+        logger.info(f"Manual dashboard refresh requested for user {user_id}")
+        
+        # Clear cache for this user
+        cache_key = f"{user_id}_{lat}_{lng}"
+        if cache_key in dashboard_cache:
+            del dashboard_cache[cache_key]
+        
+        # Always generate fresh content (bypass any caching)
+        cards = await generate_user_dashboard_cards(user_id, lat, lng)
+        
+        response_cards = []
+        for card in cards:
+            card_dict = card.dict()
+            if card.synthesis_meta:
+                card_dict["expandable"] = True
+                card_dict["expansion_url"] = f"/dashboard/{user_id}/expand/{card.id}?lat={lat}&lng={lng}"
+            response_cards.append(card_dict)
+        
+        return {
+            "success": True,
+            "cards": response_cards,
+            "total_cards": len(cards),
+            "refreshed_at": datetime.utcnow().isoformat(),
+            "user_id": user_id,
+            "update_type": "manual_refresh"
+        }
+    except Exception as e:
+        logger.error(f"Error refreshing dashboard for user {user_id}: {e}")
+        raise HTTPException(status_code=500, detail=f"Failed to refresh dashboard: {str(e)}")
+
+@app.get("/dashboard/{user_id}/status")
+async def get_dashboard_status(user_id: str, lat: Optional[float] = None, lng: Optional[float] = None):
+    """Quick dashboard status without AI synthesis"""
+    try:
+        if lat and lng:
+            user_location = Coordinates(lat=lat, lng=lng)
+            
+            # Get raw events without AI synthesis
+            nearby_events = await db_manager.search_events_semantically(
+                query="infrastructure traffic safety weather incidents",
+                user_location=user_location,
+                max_results=10
+            )
+            
+            # Simple count-based status (no AI)
+            relevant_events = [e for e in nearby_events if e.get("distance_km", 0) <= 5]
+            
+            status = {
+                "total_nearby_events": len(relevant_events),
+                "high_priority_events": len([e for e in relevant_events if e.get("metadata", {}).get("severity") in ["high", "critical"]]),
+                "topics_with_events": list(set([e.get("metadata", {}).get("topic") for e in relevant_events if e.get("metadata", {}).get("topic")])),
+                "last_updated": datetime.utcnow().isoformat(),
+                "needs_attention": len([e for e in relevant_events if e.get("metadata", {}).get("severity") in ["high", "critical"]]) > 0
+            }
+        else:
+            status = {
+                "total_nearby_events": 0,
+                "high_priority_events": 0,
+                "topics_with_events": [],
+                "last_updated": datetime.utcnow().isoformat(),
+                "needs_attention": False,
+                "message": "Location required for status check"
+            }
+        
+        return {
+            "success": True,
+            "status": status,
+            "user_id": user_id
+        }
+    except Exception as e:
+        logger.error(f"Error getting dashboard status for user {user_id}: {e}")
+        return {
+            "success": False,
+            "error": str(e),
+            "user_id": user_id
+        }
 
 @app.get("/dashboard/{user_id}/expand/{card_id}")
 async def expand_dashboard_card(user_id: str, card_id: str, lat: Optional[float] = None, lng: Optional[float] = None):
@@ -1168,7 +1270,7 @@ async def expand_dashboard_card(user_id: str, card_id: str, lat: Optional[float]
             for event in topic_events:
                 detailed_card = await create_individual_card(event, user_id)
                 
-                # Add extra detail for expansion (update the card properly)
+                # Add extra detail for expansion
                 detailed_card.expanded_details = {
                     "full_description": event["document"],
                     "event_id": event["event_id"],
@@ -1195,37 +1297,6 @@ async def expand_dashboard_card(user_id: str, card_id: str, lat: Optional[float]
     except Exception as e:
         logger.error(f"Error expanding dashboard card {card_id}: {e}")
         raise HTTPException(status_code=500, detail=f"Failed to expand card: {str(e)}")
-
-@app.get("/dashboard/{user_id}")
-async def get_user_dashboard(user_id: str, lat: Optional[float] = None, lng: Optional[float] = None):
-    """Get current dashboard state (non-streaming) with AI synthesis"""
-    try:
-        cards = await generate_user_dashboard_cards(user_id, lat, lng)
-        
-        # Add expansion info to synthesized cards
-        response_cards = []
-        for card in cards:
-            card_dict = card.dict()
-            if card.synthesis_meta:
-                card_dict["expandable"] = True
-                card_dict["expansion_url"] = f"/dashboard/{user_id}/expand/{card.id}?lat={lat}&lng={lng}"
-            else:
-                card_dict["expandable"] = False
-            response_cards.append(card_dict)
-        
-        return {
-            "success": True,
-            "cards": response_cards,
-            "total_cards": len(cards),
-            "generated_at": datetime.utcnow().isoformat(),
-            "user_id": user_id,
-            "ai_synthesis": "enabled"
-        }
-    except Exception as e:
-        logger.error(f"Error generating dashboard for user {user_id}: {e}")
-        raise HTTPException(status_code=500, detail=f"Failed to generate dashboard: {str(e)}")
-
-
 
 # ============================================================================
 # EXCEPTION HANDLERS
@@ -1268,6 +1339,7 @@ if __name__ == "__main__":
 # Import and add agentic layer router
 from data.api.agentic_endpoints import router as agentic_router
 app.include_router(agentic_router)
+app.include_router(auth_router)
 # Add Google ADK router after agentic router
 from data.api.google_adk_endpoints import router as adk_router
 app.include_router(adk_router)

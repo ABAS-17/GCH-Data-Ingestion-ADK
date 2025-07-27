@@ -1,0 +1,92 @@
+version: '3.8'
+
+services:
+  city-pulse-backend:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: city-pulse-backend
+    ports:
+      - "8000:8000"
+    environment:
+      # Firebase credentials from environment variables
+      - FIREBASE_TYPE=${FIREBASE_TYPE}
+      - FIREBASE_PROJECT_ID=${FIREBASE_PROJECT_ID}
+      - FIREBASE_PRIVATE_KEY_ID=${FIREBASE_PRIVATE_KEY_ID}
+      - FIREBASE_PRIVATE_KEY=${FIREBASE_PRIVATE_KEY}
+      - FIREBASE_CLIENT_EMAIL=${FIREBASE_CLIENT_EMAIL}
+      - FIREBASE_CLIENT_ID=${FIREBASE_CLIENT_ID}
+      - FIREBASE_AUTH_URI=${FIREBASE_AUTH_URI}
+      - FIREBASE_TOKEN_URI=${FIREBASE_TOKEN_URI}
+      - FIREBASE_AUTH_PROVIDER_X509_CERT_URL=${FIREBASE_AUTH_PROVIDER_X509_CERT_URL}
+      - FIREBASE_CLIENT_X509_CERT_URL=${FIREBASE_CLIENT_X509_CERT_URL}
+      - FIREBASE_UNIVERSE_DOMAIN=${FIREBASE_UNIVERSE_DOMAIN}
+      
+      # Google Cloud & Firebase (legacy)
+      - GOOGLE_APPLICATION_CREDENTIALS=/app/.credentials/service-account.json
+      - GOOGLE_CLOUD_PROJECT=${FIREBASE_PROJECT_ID}
+      - FIREBASE_STORAGE_BUCKET=${FIREBASE_STORAGE_BUCKET}
+      
+      # Google APIs
+      - GOOGLE_MAPS_API_KEY=${GOOGLE_MAPS_API_KEY}
+      - GOOGLE_CALENDAR_API_KEY=${GOOGLE_CALENDAR_API_KEY}
+      - GEMINI_API_KEY=${GEMINI_API_KEY}
+      - GEMINI_MODEL=${GEMINI_MODEL:-gemini-2.0-flash-exp}
+      
+      # ChromaDB Configuration
+      - CHROMA_DB_PATH=/app/chroma_db
+      - CHROMA_COLLECTION_EVENTS=city_events
+      - CHROMA_COLLECTION_USERS=user_preferences
+      
+      # Redis Configuration
+      - REDIS_HOST=city-pulse-redis
+      - REDIS_PORT=6379
+      - REDIS_DB=0
+      
+      # Application Configuration
+      - ENVIRONMENT=production
+      - LOG_LEVEL=INFO
+      - MAX_UPLOAD_SIZE_MB=50
+    volumes:
+      # Persist ChromaDB data
+      - chroma_data:/app/chroma_db
+      # Persist logs
+      - ./logs:/app/logs
+    networks:
+      - city-pulse-network
+    restart: unless-stopped
+    depends_on:
+      - city-pulse-redis
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8000/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 40s
+
+  city-pulse-redis:
+    image: redis:7-alpine
+    container_name: city-pulse-redis
+    ports:
+      - "6379:6379"
+    volumes:
+      - redis_data:/data
+    networks:
+      - city-pulse-network
+    restart: unless-stopped
+    command: redis-server --appendonly yes
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+
+volumes:
+  chroma_data:
+    driver: local
+  redis_data:
+    driver: local
+
+networks:
+  city-pulse-network:
+    driver: bridge
