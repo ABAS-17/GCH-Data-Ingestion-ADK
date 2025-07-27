@@ -19,6 +19,8 @@ import sys
 import os
 import time
 from functools import lru_cache
+from auth_endpoints import router as auth_router
+from auth_database import auth_db
 
 # Add data layer to path
 sys.path.append(os.path.dirname(os.path.abspath(__file__)))
@@ -85,6 +87,11 @@ async def startup_event():
     """Initialize databases and services on startup"""
     logger.info("🚀 Starting City Pulse Agent API...")
     
+    # Initialize authentication database
+    auth_healthy = await auth_db.initialize()
+    if not auth_healthy:
+        logger.warning("⚠️ Authentication database initialization failed")
+    
     # Initialize databases
     db_healthy = await db_manager.initialize_databases()
     if not db_healthy:
@@ -97,7 +104,6 @@ async def startup_event():
         logger.warning("⚠️ Subcategory processor initialization failed - using fallback")
     
     logger.info("✅ City Pulse Agent API started successfully")
-
 @app.get("/health", tags=["System"])
 async def health_check():
     """System health check"""
@@ -1333,6 +1339,7 @@ if __name__ == "__main__":
 # Import and add agentic layer router
 from data.api.agentic_endpoints import router as agentic_router
 app.include_router(agentic_router)
+app.include_router(auth_router)
 # Add Google ADK router after agentic router
 from data.api.google_adk_endpoints import router as adk_router
 app.include_router(adk_router)

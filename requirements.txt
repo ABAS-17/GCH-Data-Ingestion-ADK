@@ -20,7 +20,7 @@ googlemaps==4.10.0
 google-auth==2.39.0
 google-auth-oauthlib==1.2.2
 google-auth-httplib2==0.2.0
-
+email-validator==2.1.0
 # Google AI and ADK - exact working versions
 google-generativeai==0.8.3
 google-genai==1.11.0
@@ -29,7 +29,7 @@ litellm==1.52.12
 
 # Vector Database - exact working version
 chromadb==0.5.18
-
+aiosqlite==0.19.0
 # Redis for caching
 redis==5.2.0
 
